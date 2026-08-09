@@ -4,7 +4,7 @@
 
 Zynost Pay is a non-custodial crypto payment gateway. A merchant gives us an extended public key (xpub) — never a private key, never a seed phrase — and we derive a fresh, unique receive address for every single order from it. The funds land directly in the merchant's own wallet the moment a customer pays. There's no payout step, no minimum withdrawal, no balance sitting in our custody waiting to be released, because we never hold it in the first place.
 
-**Live API:** https://api.zynost.com
+**Live:** https://pay.zynost.com
 
 ## Why it exists
 
