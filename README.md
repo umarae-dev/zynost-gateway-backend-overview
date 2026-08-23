@@ -1,303 +1,142 @@
-# Zynost Pay — Non-Custodial Crypto Gateway API
+# Zynost Gateway Backend — Production-Safe Core
 
-> **Payment infrastructure designed so the gateway can verify money without ever gaining the power to move it.**
+> Real production-derived, non-custodial crypto gateway core extracted from Zynost Pay without production credentials, customer data, or live signer infrastructure.
 
-Zynost Pay is a non-custodial crypto payment gateway for developers and merchants. A merchant connects **public wallet information only** — never a seed phrase and never a spend-capable private key — and the gateway creates payment orders, watches supported chains, confirms settlement and delivers signed webhooks back to the merchant application.
+This repository now publishes the production-safe gateway logic used to derive merchant-controlled receive addresses, verify stablecoin settlement, reconcile merchant orders, and protect multi-tenant payment attribution.
 
-**Live:** https://pay.zynost.com  
-**Primary BNB use case:** BSC stablecoin checkout + ERC-4337 gas sponsorship  
-**Backend:** FastAPI + PostgreSQL  
-**Custody model:** Merchant-controlled funds
+**Primary BNB use case:** BNB Smart Chain USDT/USDC checkout  
+**Runtime:** Python 3.12  
+**Architecture:** non-custodial, watch-only address derivation + on-chain verification  
+**Related on-chain gas sponsorship:** `umarae-dev/zynost-paymaster-overview`
 
----
+## What is real production source here
 
-## The core idea
+The following files are copied from the private production gateway rather than rewritten as demos:
 
-Traditional crypto gateways often receive customer funds into provider-controlled wallets and pay merchants later. Zynost Pay takes a different approach.
+- `app/services/bip32_lite.py` — BIP32/secp256k1 child derivation primitives;
+- `app/services/wallet_derivation.py` — watch-only EVM address derivation from merchant xpubs;
+- `app/services/rpc_consensus.py` — independent-provider quorum, chain-ID validation, circuit breaking and fail-safe settlement reads;
+- `app/services/payment_check.py` — BSC/Ethereum/Polygon stablecoin verification plus Solana consumed-balance attribution;
+- `app/services/merchant_service.py` — API-key generation/rotation, webhook signing, atomic order-index reservation, order creation and FIFO reconciliation;
+- production merchant/device models and supporting security/database/push modules required by that core;
+- production regression tests covering the published behavior.
 
-For EVM payments, a merchant supplies an **extended public key (xpub)**. Zynost can derive fresh receive addresses from that public key, but an xpub contains no private spending key. Each checkout therefore receives a unique merchant-controlled address while Zynost remains able to watch the chain and reconcile the order.
+The public repository intentionally does **not** publish live credentials, user/customer records, production `.env` files, operational signer/bundler services, or temporary production migration scripts.
 
-```text
-Customer
-   │
-   │ sends USDT / USDC
-   ▼
-Unique merchant-controlled address
-   │
-   ├──── Zynost watches chain state
-   │
-   ▼
-Payment reaches confirmation policy
-   │
-   ▼
-Signed merchant webhook
-   │
-   ▼
-Merchant application fulfills order
-```
+## Non-custodial design
 
-There is no provider payout queue because Zynost is not holding a merchant balance waiting to release it. A merchant may later consolidate its own derived addresses, but that is movement of funds the merchant already controls — not a withdrawal from Zynost custody.
-
----
-
-## Why BNB Smart Chain matters
-
-BNB Smart Chain is a first-class network in Zynost Pay because it combines broad stablecoin usage with low transaction fees and EVM compatibility.
-
-The BSC integration is used for more than simply accepting a token transfer:
-
-- USDT / USDC checkout;
-- unique merchant-controlled EVM receive addresses;
-- independent RPC verification;
-- WalletConnect / connected-wallet payment flows;
-- ERC-4337 smart accounts;
-- gas-sponsored checkout through **Zynost Paymaster**.
-
-This makes BNB Chain a practical execution layer for merchants rather than just another chain name in a selector.
-
----
-
-## Payment lifecycle
-
-### 1. Merchant creates an order
-
-An authenticated merchant requests a checkout with an amount and optional order reference/description.
-
-For EVM chains, the service atomically reserves the merchant's next derivation index before creating the address. The index allocation is handled at the database level so simultaneous checkout requests cannot silently receive the same child address.
-
-### 2. A fresh EVM address is derived
-
-The address is derived watch-only from the merchant's xpub using BIP32 public-child derivation.
+For EVM checkouts, a merchant provides an **xpub**, never a seed phrase or spend-capable private key. The gateway derives a fresh address under that public key for each order. It can observe and reconcile funds, but it cannot spend from those addresses.
 
 ```text
 merchant xpub
     │
-    ▼
-change branch
-    │
-    ▼
-unique order index
-    │
-    ▼
-merchant-controlled EVM receive address
+    └── m/0/order-index
+              │
+              ▼
+   merchant-controlled EVM address
+              │
+      USDT / USDC arrives
+              │
+              ▼
+   multi-RPC settlement verifier
+              │
+              ▼
+      paid order + HMAC webhook
 ```
 
-Ethereum, BNB Smart Chain and Polygon use the same secp256k1 address format, so the same derived EVM address can be observed across supported EVM networks.
+## BNB Smart Chain settlement
 
-### 3. Zynost verifies chain state
+BNB Smart Chain is a first-class production path. The published source contains the accepted BSC USDT/USDC contracts, chain ID `56`, and the production rule that BSC stablecoins use **18 decimals** in this integration.
 
-The gateway does **not** accept one RPC provider as an oracle for real-money settlement.
+An EVM payment is not confirmed from a single provider's answer. `RpcConsensusValidator` requires at least two independent providers, verifies each provider's reported chain ID, rejects malformed responses, rate-limits providers, opens a circuit after repeated failures, and fails safe when quorum is unavailable.
 
-For supported EVM payment checks, multiple independent RPC providers are queried and the gateway requires quorum agreement on the relevant on-chain value. Every participating provider is also checked against the expected chain ID.
+The default no-key provider pool still includes PublicNode plus Ankr's public endpoint. Optional Alchemy, QuickNode and keyed Ankr endpoints can expand the pool through environment configuration.
 
-If quorum cannot be reached, the system fails safe: the payment remains unverified for that polling round instead of trusting whichever endpoint happened to answer.
+## Payment policy
 
-### 4. Practical underpayment handling
+The production payment checker accepts a qualifying observed balance at **99% or more** of the invoice amount. This is an explicit checkout policy intended to absorb common exchange withdrawal fees; the production tests verify that a typical 1% shortfall can confirm while a materially larger shortfall remains rejected.
 
-The current production policy accepts a payment once the observed eligible balance reaches at least **99% of the invoiced amount**. This is a deliberate checkout policy for real-world cases such as exchange withdrawal fees rather than pretending every transfer arrives with mathematically exact decimal equality.
+For Solana, multiple orders can share a merchant payout address. The published production code therefore tracks how much balance has already been consumed by earlier orders and processes pending orders FIFO, preventing one real payment from satisfying multiple orders.
 
-### 5. Signed fulfillment signal
+## Merchant security
 
-Once an order is confirmed, Zynost sends the merchant a webhook signed with HMAC-SHA256. The receiving application verifies the signature before fulfilling the order.
+The published merchant core includes:
 
----
+- cryptographically random `zg_live_...` API keys;
+- SHA-256 storage of high-entropy API-key secrets rather than plaintext recovery;
+- a 24-hour previous-key grace window for safe rotation;
+- HMAC-SHA256 signed webhook payloads;
+- independent webhook-secret rotation;
+- atomic PostgreSQL `UPDATE ... RETURNING` reservation of each merchant's next derivation index;
+- free/flat/volume billing-cycle controls used by the production order core.
 
-## Multi-RPC verification
+## Tests
 
-A payment processor should not have a single infrastructure provider whose incorrect answer can decide whether a merchant gets paid.
+The public test suite is copied from production and includes regression coverage for:
 
-Zynost's EVM verifier is therefore designed around:
+- full RPC agreement and 2-of-3 majority;
+- quorum failure and fail-safe behavior;
+- provider timeouts and wrong-chain responses;
+- malformed RPC values;
+- circuit breaking and per-provider rate limiting;
+- BSC 18-decimal wallet metadata;
+- real matching balances and underpayment policy;
+- Solana consumed-balance watermarking;
+- FIFO protection against double fulfillment;
+- API-key grace-period boundaries;
+- atomic EVM order-index reservation.
 
-- multiple independent RPC providers;
-- configurable quorum rather than first-response-wins;
-- chain-ID validation for every provider;
-- malformed-response rejection;
-- per-provider rate limiting;
-- circuit breaking for repeatedly failing providers;
-- explicit logging when providers disagree;
-- fail-safe behavior when consensus is unavailable.
+Run locally:
 
-This architecture treats RPC disagreement as something to investigate, not something to silently average away.
-
----
-
-## API and merchant security
-
-### API keys
-
-Merchant API keys are generated with cryptographic randomness. The production system stores only a hash of the active secret rather than a recoverable plaintext copy.
-
-Key rotation includes a controlled grace window so a merchant can roll credentials across production systems without instantly breaking every existing integration.
-
-### Webhook signing
-
-Webhook payloads are signed per merchant using HMAC-SHA256. Webhook secrets can be rotated independently from API credentials.
-
-### Payout-address changes
-
-Changing the public wallet information that determines where future orders settle is treated as a high-risk account action rather than an ordinary instant settings toggle. The production workflow uses an explicit change-request/review path.
-
-### Administrative controls
-
-Sensitive administrative functions are protected server-side rather than merely hidden in the interface.
-
----
-
-## Gasless checkout on BNB Smart Chain
-
-A customer may have the required stablecoin but no native BNB for gas. Zynost Pay can route that case through an ERC-4337 smart account and the separate **[Zynost Paymaster](https://github.com/umarae-dev/zynost-paymaster-overview)** sponsorship layer.
-
-High-level flow:
-
-```text
-Customer wallet
-    │
-    │ free signature / intent
-    ▼
-ERC-4337 smart account
-    │
-    │ stablecoin balance verified
-    ▼
-Server constructs order-bound transfer
-    │
-    ▼
-Paymaster policy + on-chain limits
-    │
-    ▼
-Bundler / EntryPoint
-    │
-    ▼
-BNB Smart Chain
-    │
-    ▼
-Merchant-controlled order address
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements-dev.txt
+python scripts/check_public_repo.py
+python -m compileall -q app
+pytest -q
 ```
 
-Important invariants:
+No production credential is required for these tests.
 
-- the server does not accept a client-supplied payment destination as authoritative;
-- the order destination is taken from the merchant's actual order record;
-- smart-account funding is re-verified from chain state;
-- sponsorship pays network gas, not the customer's purchase amount;
-- the paymaster cannot spend merchant payment funds;
-- the gasless path ultimately settles into the same reconciliation pipeline as a normal payment.
+## Public / private boundary
 
-The production implementation intentionally keeps signer credentials, bundler configuration and operational abuse controls out of this public repository.
+### Published
 
----
+- production-safe settlement and merchant-order core;
+- watch-only derivation code;
+- public chain/token constants;
+- production data models required by the published core;
+- production regression tests;
+- secret-free configuration schema and `.env.example`;
+- CI and repository secret guard.
 
-## Supported payment networks
+### Not published
 
-Current gateway architecture includes:
+- production database or user data;
+- actual JWT, SMTP, Firebase, RPC-provider or WalletConnect credentials;
+- spend-capable wallet material;
+- Paymaster verifying-signer material;
+- bundler credentials and operational gas-sponsorship abuse controls;
+- the production User mirror because its source contains an account-specific identifier not needed by this public core;
+- temporary one-off migration/check scripts;
+- unrelated private application routes and operational runbooks.
 
-| Network | Model | Stablecoins |
-|---|---|---|
-| **BNB Smart Chain** | Unique EVM address + gasless option | USDT, USDC |
-| Ethereum | Unique EVM address | USDT, USDC |
-| Polygon | Unique EVM address | USDT, USDC |
-| Solana | Merchant payout address + balance attribution | USDT, USDC |
+See `PUBLIC_PRIVATE_BOUNDARY.md` and `SECURITY.md`.
 
-Solana differs from the EVM path because it does not use the same watch-only xpub child-address model. The production gateway therefore tracks already-attributed balance so one incoming payment cannot accidentally satisfy multiple pending orders that share a merchant address.
+## ERC-4337 boundary
 
----
+Gas sponsorship is split deliberately. The inspectable on-chain Paymaster and its production tests live in the separate `zynost-paymaster-overview` repository. This gateway repository does not publish the live off-chain signer/bundler operational path or its credentials.
 
-## Billing
+## CI
 
-Merchants can use a free evaluation tier and choose between two commercial models as they scale:
+GitHub Actions installs the public test environment on Python 3.12, runs the repository secret guard, compiles the published Python source, imports the gateway core, and executes all published production tests.
 
-- **Flat:** $19/month for unlimited orders after the free allowance;
-- **Volume:** 0.3% of successfully paid volume.
+## License
 
-Billing-mode changes are applied at billing-cycle boundaries rather than allowing mid-cycle switching to bypass the active plan's limits.
-
-Zynost's own subscription checkout also uses the same non-custodial gateway architecture — there is no privileged custodial payment rail reserved for the parent product.
-
----
-
-## Trust boundaries
-
-| Component | What it can do | What it cannot do |
-|---|---|---|
-| Gateway backend | Create orders, derive public addresses, verify chain state | Spend from merchant xpub-derived addresses |
-| RPC providers | Report blockchain state | Single-handedly confirm an EVM payment when quorum is required |
-| Paymaster | Sponsor eligible transaction gas | Spend merchant/customer payment balances |
-| Merchant webhook secret | Authenticate Zynost webhook payloads | Move on-chain funds |
-| Customer wallet | Authorize its own transaction | Change the gateway's server-side merchant destination |
-
----
-
-## Production vs. public repository boundary
-
-This repository is a **public technical overview** of a production payment system. It is intentionally not a mirror of the private deployment repository.
-
-### Public here
-
-- architecture;
-- custody model;
-- BNB integration model;
-- payment lifecycle;
-- security invariants;
-- RPC-consensus design;
-- merchant/API concepts;
-- gasless-checkout architecture.
-
-### Kept private
-
-- private keys, seed phrases and signing credentials;
-- database credentials;
-- merchant/customer data;
-- production environment variables;
-- internal operational runbooks;
-- abuse-detection thresholds where disclosure would weaken production defenses;
-- proprietary backend implementation not required for public verification.
-
-No production credential should ever be committed to this repository.
-
----
-
-## Open-source / BNB developer track
-
-The commercial gateway remains a private production service, but Zynost is preparing a **separately scoped open-source BNB component** for developer/hackathon use.
-
-That component is intended to be reproducible with local/testnet configuration and inspectable without requiring any Zynost production credential. The goal is to contribute useful BNB-native technology without turning a live payment backend into unnecessary public attack surface.
-
-This repository will link to the open-source component once it is ready.
-
----
-
-## Broader Zynost ecosystem
-
-```text
-Zynost Intelligence
-        │
-        ▼
-Zynost Wallet
-        │
-        ├───────────────┐
-        ▼               ▼
-   Zynost Pay      UQX ecosystem
-        │
-        ▼
- Zynost Paymaster
-        │
-        ▼
-  BNB Smart Chain
-```
-
-The broader direction is an integrated crypto stack covering **decision intelligence, self-custody, merchant payments, account abstraction and a BNB-native community/token layer**.
-
----
-
-## Technology
-
-FastAPI · PostgreSQL / async SQLAlchemy · Docker · BIP32 public-child derivation · secp256k1 · multi-provider JSON-RPC consensus · HMAC-SHA256 webhooks · WalletConnect · ERC-4337 Account Abstraction · BNB Smart Chain
-
----
+The public mirror is released under Apache-2.0. Third-party dependencies retain their own licenses.
 
 ## Status
 
-**Active production infrastructure.**
-
-Zynost Pay is used for live payment flows, including Zynost's own subscription checkout. Security hardening, operational monitoring and independent review remain ongoing priorities as the gateway expands.
-
-For responsible security reporting, see [`SECURITY.md`](SECURITY.md).
+**Production-safe gateway core is publicly inspectable and independently testable. Live operational infrastructure remains separately operated and private.**
