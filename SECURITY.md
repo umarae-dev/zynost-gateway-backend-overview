@@ -4,9 +4,9 @@ Zynost Pay is payment infrastructure. Please treat security findings responsibly
 
 ## What this public repository contains
 
-This repository documents architecture, trust boundaries, security invariants and the public behavior of the Zynost Pay gateway.
+This repository contains a production-safe subset of the real gateway backend: watch-only address derivation, multi-RPC settlement verification, merchant order/security logic, supporting models, and production regression tests.
 
-It intentionally does **not** contain production credentials, private keys, seed phrases, customer/merchant data, signing secrets, production database access, operational runbooks or the complete private backend source.
+It intentionally does **not** contain production credentials, private keys, seed phrases, customer/merchant data, live signing material, production database access, operational signer/bundler controls, or private runbooks.
 
 ## Reporting a vulnerability
 
@@ -41,4 +41,4 @@ Useful reports may include:
 
 The gateway is built around a simple invariant: **Zynost should be able to verify and coordinate a payment without obtaining the private keys required to spend merchant funds.**
 
-Security controls continue to evolve as the system is reviewed and expanded.
+The public source makes those inspectable controls reviewable; live credentials and operational controls remain outside this repository.
