@@ -45,6 +45,10 @@ from app.core.config import settings
 
 logger = logging.getLogger("gateway.rpc_consensus")
 
+# Alchemy's per-chain subdomain naming and Ankr's per-chain path segment,
+# keyed by this codebase's own chain-name convention (see payment_check.py's
+# _EVM_RPCS) so callers never need to know these vendor-specific naming
+# schemes themselves.
 _ALCHEMY_SUBDOMAIN = {"ethereum": "eth-mainnet", "binance-smart-chain": "bnb-mainnet", "polygon-pos": "polygon-mainnet"}
 _ANKR_PATH = {"ethereum": "eth", "binance-smart-chain": "bsc", "polygon-pos": "polygon"}
 _QUICKNODE_SETTING = {
@@ -100,16 +104,19 @@ class ConsensusResult:
     value: int | None
     reached: bool
     agreeing_providers: list[str] = field(default_factory=list)
-    disagreeing: dict[str, str] = field(default_factory=dict)
-    unavailable: list[str] = field(default_factory=list)
+    disagreeing: dict[str, str] = field(default_factory=dict)  # provider name -> raw hex they returned
+    unavailable: list[str] = field(default_factory=list)  # circuit-open, rate-limited, timed out, or wrong chain ID
     responded: int = 0
     total_providers: int = 0
 
 
-_FAILURE_THRESHOLD = 5
-_COOLDOWN_SECONDS = 60.0
-_RATE_LIMIT_PER_SECOND = 8.0
-_RATE_LIMIT_BURST = 8.0
+# --- Per-provider state, kept at module scope so it persists across
+# requests. ---
+
+_FAILURE_THRESHOLD = 5          # consecutive failures before a provider's circuit opens
+_COOLDOWN_SECONDS = 60.0        # how long an open circuit stays open before a half-open trial
+_RATE_LIMIT_PER_SECOND = 8.0    # token-bucket refill rate per provider
+_RATE_LIMIT_BURST = 8.0         # token-bucket capacity per provider
 
 
 @dataclass
@@ -167,8 +174,8 @@ def _is_valid_hex_uint(value: str) -> bool:
         return False
     hex_digits = value[2:]
     if not hex_digits:
-        return True
-    if len(hex_digits) > 64:
+        return True  # "0x" alone is a valid (zero) uint256 encoding some nodes return
+    if len(hex_digits) > 64:  # 32 bytes = 64 hex chars
         return False
     try:
         int(hex_digits, 16)
@@ -184,7 +191,13 @@ class RpcConsensusValidator:
     response in the same request batch — never cached/assumed once and
     reused."""
 
-    def __init__(self, providers: list[RpcProvider], expected_chain_id: int, quorum: int | None = None, timeout_seconds: float = 6.0):
+    def __init__(
+        self,
+        providers: list[RpcProvider],
+        expected_chain_id: int,
+        quorum: int | None = None,
+        timeout_seconds: float = 6.0,
+    ):
         if len(providers) < 2:
             raise ValueError("RpcConsensusValidator needs at least 2 independent providers to mean anything.")
         self.providers = providers
@@ -195,33 +208,52 @@ class RpcConsensusValidator:
         self.timeout_seconds = timeout_seconds
 
     async def _query_one(self, client: httpx.AsyncClient, provider: RpcProvider, to: str, data: str) -> tuple[str, str | None]:
+        """Returns (provider_name, raw_hex_result_or_None). None means
+        "does not count as a vote" — rate-limited, circuit-open, timed out,
+        malformed, or wrong chain ID all collapse to this same outcome."""
         state = _state_for(provider.name)
+
         if state.circuit_is_open():
             logger.warning("rpc_consensus: %s circuit OPEN, skipping this round", provider.name)
             return provider.name, None
+
         if not state.try_consume_token():
             logger.warning("rpc_consensus: %s rate-limited, skipping this round", provider.name)
             return provider.name, None
-        attempts = 2
+
+        attempts = 2  # one retry on transient network errors, no more
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                chain_id_resp = await client.post(provider.url, json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}, timeout=self.timeout_seconds)
+                chain_id_resp = await client.post(
+                    provider.url,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []},
+                    timeout=self.timeout_seconds,
+                )
                 chain_id_hex = (chain_id_resp.json() or {}).get("result")
                 if not isinstance(chain_id_hex, str):
                     raise ValueError(f"eth_chainId returned no usable result: {chain_id_hex!r}")
                 reported_chain_id = int(chain_id_hex, 16)
                 if reported_chain_id != self.expected_chain_id:
-                    logger.error("rpc_consensus: %s reported chain ID %s, expected %s - discarding its answer entirely", provider.name, reported_chain_id, self.expected_chain_id)
+                    logger.error(
+                        "rpc_consensus: %s reported chain ID %s, expected %s - discarding its answer entirely",
+                        provider.name, reported_chain_id, self.expected_chain_id,
+                    )
                     state.record_failure()
                     return provider.name, None
-                balance_resp = await client.post(provider.url, json={"jsonrpc": "2.0", "id": 2, "method": "eth_call", "params": [{"to": to, "data": data}, "latest"]}, timeout=self.timeout_seconds)
+
+                balance_resp = await client.post(
+                    provider.url,
+                    json={"jsonrpc": "2.0", "id": 2, "method": "eth_call", "params": [{"to": to, "data": data}, "latest"]},
+                    timeout=self.timeout_seconds,
+                )
                 payload = balance_resp.json() or {}
                 if "error" in payload:
                     raise RuntimeError(f"eth_call error from {provider.name}: {payload['error']}")
                 result = payload.get("result")
                 if not _is_valid_hex_uint(result):
                     raise ValueError(f"malformed/out-of-range result from {provider.name}: {result!r}")
+
                 state.record_success()
                 return provider.name, result
             except Exception as e:  # noqa: BLE001 - deliberately broad: any failure here is "this provider didn't vote"
@@ -229,29 +261,54 @@ class RpcConsensusValidator:
                 if attempt < attempts - 1:
                     await asyncio.sleep(0.3 * (attempt + 1))
                     continue
+
         state.record_failure()
         logger.warning("rpc_consensus: %s failed after retries: %s", provider.name, last_error)
         return provider.name, None
 
     async def eth_call_balance_of(self, client: httpx.AsyncClient, contract_address: str, holder_address: str) -> ConsensusResult:
+        """The one real read this system needs consensus on: an ERC20
+        balanceOf(holder) call against a stablecoin contract, used to decide
+        whether a merchant order/invoice is confirmed."""
         padded_holder = holder_address.lower().replace("0x", "").zfill(64)
         data = _ERC20_BALANCE_OF_SELECTOR + padded_holder
-        results = await asyncio.gather(*(self._query_one(client, p, contract_address, data) for p in self.providers))
-        votes: dict[str, list[str]] = {}
+
+        results = await asyncio.gather(
+            *(self._query_one(client, p, contract_address, data) for p in self.providers)
+        )
+
+        votes: dict[str, list[str]] = {}  # raw_hex -> [provider names that returned it]
         unavailable: list[str] = []
         for name, raw in results:
             if raw is None:
                 unavailable.append(name)
                 continue
             votes.setdefault(raw, []).append(name)
+
         responded = len(self.providers) - len(unavailable)
+
         if not votes:
             logger.warning("rpc_consensus: no provider returned a usable result this round (%s/%s unavailable)", len(unavailable), len(self.providers))
             return ConsensusResult(value=None, reached=False, unavailable=unavailable, responded=responded, total_providers=len(self.providers))
+
         winning_hex, winning_voters = max(votes.items(), key=lambda kv: len(kv[1]))
         disagreeing = {name: raw for raw, names in votes.items() if raw != winning_hex for name in names}
+
         if disagreeing:
-            logger.error("rpc_consensus: DISAGREEMENT on balanceOf(%s) at %s - majority=%s (%d votes), dissenters=%s", holder_address, contract_address, winning_hex, len(winning_voters), disagreeing)
+            logger.error(
+                "rpc_consensus: DISAGREEMENT on balanceOf(%s) at %s - majority=%s (%d votes), dissenters=%s",
+                holder_address, contract_address, winning_hex, len(winning_voters), disagreeing,
+            )
+
         reached = len(winning_voters) >= self.quorum
         value = int(winning_hex, 16) if (reached and winning_hex not in ("", "0x")) else (0 if reached else None)
-        return ConsensusResult(value=value, reached=reached, agreeing_providers=winning_voters, disagreeing=disagreeing, unavailable=unavailable, responded=responded, total_providers=len(self.providers))
+
+        return ConsensusResult(
+            value=value,
+            reached=reached,
+            agreeing_providers=winning_voters,
+            disagreeing=disagreeing,
+            unavailable=unavailable,
+            responded=responded,
+            total_providers=len(self.providers),
+        )
