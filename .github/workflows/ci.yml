@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gateway-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install production and test dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt
+      - name: Public repository guard
+        run: python scripts/check_public_repo.py
+      - name: Compile public source
+        run: python -m compileall -q app
+      - name: Import production gateway core
+        run: python -c "from app.services import payment_check, rpc_consensus, merchant_service; print(bool(payment_check._CHAIN_IDS), rpc_consensus.RpcConsensusValidator.__name__, merchant_service.FREE_MONTHLY_ORDER_CAP)"
+      - name: Production-derived public tests
+        run: pytest -q
