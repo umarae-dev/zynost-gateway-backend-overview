@@ -1,17 +1,17 @@
 # Zynost Gateway Backend — Production-Safe Core
 
-> Real production-derived, non-custodial crypto gateway core extracted from Zynost Pay without production credentials, customer data, or live signer infrastructure.
+> Production-derived, non-custodial crypto gateway core extracted from Zynost Pay without production credentials, customer data or live signer infrastructure.
 
-This repository now publishes the production-safe gateway logic used to derive merchant-controlled receive addresses, verify stablecoin settlement, reconcile merchant orders, and protect multi-tenant payment attribution.
+This repository publishes the production-safe gateway logic used to derive merchant-controlled receive addresses, verify stablecoin settlement, reconcile merchant orders and protect multi-tenant payment attribution.
 
 **Primary BNB use case:** BNB Smart Chain USDT/USDC checkout  
 **Runtime:** Python 3.12  
 **Architecture:** non-custodial, watch-only address derivation + on-chain verification  
-**Related on-chain gas sponsorship:** `umarae-dev/zynost-paymaster-overview`
+**Related gas sponsorship:** `umarae-dev/zynost-paymaster-overview`
 
-## What is real production source here
+## Production-derived source published here
 
-The following files are copied from the private production gateway rather than rewritten as demos:
+The following files are copied from the private production gateway rather than rewritten as demonstrations:
 
 - `app/services/bip32_lite.py` — BIP32/secp256k1 child derivation primitives;
 - `app/services/wallet_derivation.py` — watch-only EVM address derivation from merchant xpubs;
@@ -21,7 +21,7 @@ The following files are copied from the private production gateway rather than r
 - production merchant/device models and supporting security/database/push modules required by that core;
 - production regression tests covering the published behavior.
 
-The public repository intentionally does **not** publish live credentials, user/customer records, production `.env` files, operational signer/bundler services, or temporary production migration scripts.
+The public repository intentionally does **not** publish live credentials, user/customer records, production `.env` files, operational signer/bundler services or temporary production migration scripts.
 
 ## Non-custodial design
 
@@ -50,13 +50,13 @@ BNB Smart Chain is a first-class production path. The published source contains 
 
 An EVM payment is not confirmed from a single provider's answer. `RpcConsensusValidator` requires at least two independent providers, verifies each provider's reported chain ID, rejects malformed responses, rate-limits providers, opens a circuit after repeated failures, and fails safe when quorum is unavailable.
 
-The default no-key provider pool still includes PublicNode plus Ankr's public endpoint. Optional Alchemy, QuickNode and keyed Ankr endpoints can expand the pool through environment configuration.
+The default no-key provider pool includes PublicNode plus Ankr's public endpoint. Optional Alchemy, QuickNode and keyed Ankr endpoints can expand the pool through environment configuration.
 
 ## Payment policy
 
 The production payment checker accepts a qualifying observed balance at **99% or more** of the invoice amount. This is an explicit checkout policy intended to absorb common exchange withdrawal fees; the production tests verify that a typical 1% shortfall can confirm while a materially larger shortfall remains rejected.
 
-For Solana, multiple orders can share a merchant payout address. The published production code therefore tracks how much balance has already been consumed by earlier orders and processes pending orders FIFO, preventing one real payment from satisfying multiple orders.
+For Solana, multiple orders can share a merchant payout address. The published production code therefore tracks how much balance has already been consumed by earlier orders and processes pending orders FIFO, preventing one observed payment from satisfying multiple orders.
 
 ## Merchant security
 
@@ -64,7 +64,7 @@ The published merchant core includes:
 
 - cryptographically random `zg_live_...` API keys;
 - SHA-256 storage of high-entropy API-key secrets rather than plaintext recovery;
-- a 24-hour previous-key grace window for safe rotation;
+- a 24-hour previous-key grace window for rotation;
 - HMAC-SHA256 signed webhook payloads;
 - independent webhook-secret rotation;
 - atomic PostgreSQL `UPDATE ... RETURNING` reservation of each merchant's next derivation index;
@@ -72,7 +72,7 @@ The published merchant core includes:
 
 ## Tests
 
-The public test suite is copied from production and includes regression coverage for:
+The public regression suite covers:
 
 - full RPC agreement and 2-of-3 majority;
 - quorum failure and fail-safe behavior;
@@ -80,7 +80,7 @@ The public test suite is copied from production and includes regression coverage
 - malformed RPC values;
 - circuit breaking and per-provider rate limiting;
 - BSC 18-decimal wallet metadata;
-- real matching balances and underpayment policy;
+- matching observed balances and underpayment policy;
 - Solana consumed-balance watermarking;
 - FIFO protection against double fulfillment;
 - API-key grace-period boundaries;
@@ -115,7 +115,7 @@ No production credential is required for these tests.
 ### Not published
 
 - production database or user data;
-- actual JWT, SMTP, Firebase, RPC-provider or WalletConnect credentials;
+- JWT, SMTP, Firebase, RPC-provider or WalletConnect credentials;
 - spend-capable wallet material;
 - Paymaster verifying-signer material;
 - bundler credentials and operational gas-sponsorship abuse controls;
@@ -131,7 +131,15 @@ Gas sponsorship is split deliberately. The inspectable on-chain Paymaster and it
 
 ## CI
 
-GitHub Actions installs the public test environment on Python 3.12, runs the repository secret guard, compiles the published Python source, imports the gateway core, and executes all published production tests.
+GitHub Actions installs the public test environment on Python 3.12, runs the repository secret guard, compiles the published Python source, imports the gateway core and executes all published production tests.
+
+## Related repositories
+
+- [Zynost Pay client core](https://github.com/umarae-dev/zynost-pay-overview)
+- [Zynost Paymaster](https://github.com/umarae-dev/zynost-paymaster-overview)
+- [Zynost Intelligence public reference](https://github.com/umarae-dev/tradeos-backend-overview)
+- [UQX Android wallet overview](https://github.com/umarae-dev/uqx-app-overview)
+- [UQX BNB contracts](https://github.com/umarae-dev/uqx-bnb-contracts-overview)
 
 ## License
 
